@@ -20,7 +20,7 @@ required = []
 
 setup(
     name='pyclap',
-    version=envoy.__version__,
+    version=pyclap.__version__,
     description='Smart command line arguments parser',
     long_description=open('README.rst').read(),
     author='Oleg Butovich',
