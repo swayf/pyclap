@@ -2,6 +2,7 @@ __version__ = '0.1.0'
 
 #TODO: add possibility to define defaults as function or class member of current instance
 #TODO: add possibility to define substitutions context for help
+#TODO: add support for "module commands"
 
 
 __all__=['call', 'annotations', 'Annotation', 'Positional', 'Option', 'Flag', 'iterable']
