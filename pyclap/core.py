@@ -5,7 +5,7 @@ __version__ = '0.1.0'
 #TODO: add support for "module commands"
 
 
-__all__=['call', 'annotations', 'Annotation', 'Positional', 'Option', 'Flag', 'iterable']
+__all__=['call', 'annotations', 'Annotation', 'Positional', 'Option', 'Flag', 'iterable', 'wizard_call']
 
 import keyword
 import re, sys, inspect, argparse
@@ -408,7 +408,7 @@ class ArgumentParser(argparse.ArgumentParser):
 
 
     @classmethod
-    def parser_from(cls, obj, ignore_errors=False, **conf_params):
+    def parser_from(cls, obj, **conf_params):
         """
         obj can be a callable or an object with a .commands attribute.
         Returns an ArgumentParser.
@@ -421,10 +421,13 @@ class ArgumentParser(argparse.ArgumentParser):
             builder = CallableParserBuilder(obj)
 
         parser = builder.build_parser(**conf_params)
-        parser.ignore_errors = ignore_errors
-        parser.ignored_errors = []
-
         return parser
+
+    def __init__(self, ignore_errors=False, *args, **kwargs):
+        self.ignore_errors = ignore_errors
+        self.ignored_errors = []
+        super(ArgumentParser, self).__init__(*args, **kwargs)
+
 
 
     def populate_subcommands(self, commands, obj, title='subcommands', cmd_prefix=''):
@@ -671,7 +674,7 @@ def wizard_call(obj, wizard_callback, arg_list=sys.argv[1:], greedy=False, defau
     parents.append(parser)
 
     params = set(parser_params)
-    params -= set(('parents','ignore_errors'))
+    params -= set(('parents', 'ignore_errors'))
 
     filtered_params = dict([(k, v) for k,v in parser_params if k in params])
 

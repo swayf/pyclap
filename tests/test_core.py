@@ -1,7 +1,7 @@
 from cStringIO import StringIO
 from difflib import Differ
 import sys
-from pyclap import annotations, call, Positional as Pos, Option as Opt, wizard_call, Flag
+from pyclap import annotations, call, Positional as Pos, Option as Opt, Flag, wizard_call
 from nose.tools import *
 
 
@@ -226,6 +226,27 @@ def test_interface_1():
     ns, output = call(Interface, arg_list=['search', 'test'])
     eq_(output[0], ' 5555 test')
 
+@outputs(stderr=
+"""usage: noserunner.py search [-h] [-f] regex
+noserunner.py search: error: too few arguments
+""")
+@exits(2)
+def test_interface_2():
+
+    class Interface(object):
+        commands=['search']
+        def __init__(self):
+            self.result = ' 5555 '
+
+        @annotations(regex=Pos("Regular Expression"),
+                     test_flag=Flag("Flag","f"))
+        def search(self, regex, test_flag=False):
+            return self.result + regex, test_flag
+
+
+    call(Interface, arg_list=['search', '-f'])
+
+
 
 def test_wizard_1():
     @annotations(test2_arg=Pos("test2 help message"),
@@ -242,3 +263,5 @@ def test_wizard_1():
     ns, output = wizard_call(func, wizard_callback, arg_list=[])
     eq_(ns['test2_arg'], '7890')
     eq_(ns['test2_code'], 'test_2')
+
+
