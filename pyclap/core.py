@@ -205,35 +205,10 @@ class KwargsAction(argparse.Action):
 
 
 
-class CommandSpec(object):
+
+
+class CallableCommandSpec(object):
     NONE = object()
-
-    @classmethod
-    def get_arg_spec(cls, callable_obj):
-        """Given a callable return an object with attributes .args, .varargs,
-        .varkw, .defaults. It tries to do the "right thing" with functions,
-        methods, classes and generic callables."""
-        if inspect.isfunction(callable_obj):
-            arg_spec = getfullargspec(callable_obj)
-        elif inspect.ismethod(callable_obj):
-            arg_spec = getfullargspec(callable_obj)
-            del arg_spec.args[0] # remove first argument
-        elif inspect.isclass(callable_obj):
-            if callable_obj.__init__ is object.__init__: # to avoid an error
-                arg_spec = getfullargspec(lambda self: None)
-            else:
-                arg_spec = getfullargspec(callable_obj.__init__)
-            del arg_spec.args[0] # remove first argument
-        elif hasattr(callable_obj, '__call__'):
-            arg_spec = getfullargspec(callable_obj.__call__)
-            del arg_spec.args[0] # remove first argument
-        else:
-            raise TypeError('Could not determine the signature of ' + str(callable_obj))
-        return arg_spec
-
-
-
-class CallableCommandSpec(CommandSpec):
 
     def __init__(self, obj):
         self.arg_spec = self.get_arg_spec(obj)
@@ -253,6 +228,18 @@ class CallableCommandSpec(CommandSpec):
                 self.annotations[key] = Annotation.from_(self.arg_spec.annotations.get(key, ()))
 
 
+    def get_arg_spec(self, obj):
+        if inspect.isfunction(obj):
+            arg_spec = getfullargspec(obj)
+        elif inspect.ismethod(obj):
+            arg_spec = getfullargspec(obj)
+            del arg_spec.args[0] # remove first argument
+        else:
+            raise ValueError('Argument is not function and not method')
+        return arg_spec
+
+
+
     def __call__(self, *args, **kwargs):
         return self.obj(*args, **kwargs)
 
@@ -261,8 +248,78 @@ class CallableCommandSpec(CommandSpec):
         return getattr(self.obj, item)
 
 
+class ModuleCommandsSpec(object):
 
-class ClassCommandsSpec(CommandSpec):
+    def __init__(self, module, commands):
+        self.commands = commands
+        self.module = module
+        self.command_spec_cache = {}
+
+
+    def _get_command_spec(self, command):
+        if command not in self.command_spec_cache:
+            self.command_spec_cache[command] = CallableCommandSpec(getattr(self.module, command))
+        return self.command_spec_cache[command]
+
+
+    def __getattr__(self, item):
+        if item not in self.commands:
+            return getattr(self.module, item)
+        else:
+            def wrapper(*args, **kwargs):
+                #constructor_args = args[:len(self.common_meta.vars)]
+                #rest_args = args[len(self.common_meta.vars):]
+                #obj = self._get_instance(constructor_args)
+                function = getattr(self.module, item)
+                result = function(*args, **kwargs)
+                if iterable(result):
+                    for res in result:
+                        yield res
+                else:
+                    yield result
+
+            wrapper.callable_spec = self._get_command_spec(item)
+
+            return wrapper
+
+
+class ObjectCommandsSpec(object):
+
+    def __init__(self, obj, commands):
+        self.commands = commands
+        self.obj = obj
+        self.instances_cache = {}
+        self.command_spec_cache = {}
+        if not hasattr(self.obj, '__enter__'):
+            self.obj.__enter__ = lambda : None
+            self.obj.__exit__ = lambda et, ex, tb: None
+
+
+    def _get_command_spec(self, command):
+        if command not in self.command_spec_cache:
+            self.command_spec_cache[command] = CallableCommandSpec(getattr(self.obj, command))
+        return self.command_spec_cache[command]
+
+
+    def __getattr__(self, item):
+        if item not in self.commands:
+            return getattr(self.obj, item)
+        else:
+            def wrapper(*args, **kwargs):
+                method = getattr(self.obj, item)
+                with self.obj:
+                    result = method(*args, **kwargs)
+                    if iterable(result):
+                        for res in result:
+                            yield res
+                    else:
+                        yield result
+
+            wrapper.callable_spec = self._get_command_spec(item)
+
+            return wrapper
+
+class ClassCommandsSpec(object):
 
     def __init__(self, klass, commands):
         self.commands = commands
@@ -271,6 +328,21 @@ class ClassCommandsSpec(CommandSpec):
         self.command_spec_cache = {}
         self.arg_spec = self.get_arg_spec(klass)
         self.common_meta = CallableCommandSpec(klass.__init__)
+
+
+    def get_arg_spec(self, obj):
+        if inspect.isclass(obj):
+            if obj.__init__ is object.__init__: # to avoid an error
+                arg_spec = getfullargspec(lambda self: None)
+            else:
+                arg_spec = getfullargspec(obj.__init__)
+            del arg_spec.args[0] # remove first argument
+        elif hasattr(obj, '__call__'):
+            arg_spec = getfullargspec(obj.__call__)
+            del arg_spec.args[0] # remove first argument
+        else:
+            raise TypeError('Could not determine the signature of ' + str(obj))
+        return arg_spec
 
 
     def _get_instance(self, constructor_args):
@@ -313,79 +385,98 @@ class ClassCommandsSpec(CommandSpec):
 
 
 
-
-#class ClassInteractiveCommandsSpec(ClassCommandsSpec):
-#
-#    def __getattr__(self, item):
-#        if item not in self.commands:
-#            return getattr(self.klass, item)
-#        else:
-#            def wrapper(*args, **kwargs):
-#                constructor_args = args[:len(self.common_meta.vars)]
-#                rest_args = args[len(self.common_meta.vars):]
-#                obj = self._get_instance(constructor_args)
-#                method = getattr(obj, item)
-#                with obj:
-#                    result = method(*rest_args, **kwargs)
-#                    if iterable(result):
-#                        for res in result:
-#                            yield res
-#                    else:
-#                        yield result
-#
-#            wrapper.callable_spec = self._get_command_spec(item)
-#
-#            return wrapper
-
-
-
-
 class BaseParserBuilder(object):
-    def __init__(self, entity):
-        self.entity = entity
-        self.parser_conf = ArgumentParser.get_conf(entity)
+    def can_build(self, obj):
+        raise NotImplementedError()
 
 
-    def build_parser(self, **conf_params):
+    def build_parser(self, obj,  **conf_params):
+        self.obj = obj
+        self.parser_conf = ArgumentParser.get_conf(obj)
         conf = self.parser_conf.copy()
         conf.update(conf_params)
         parser = ArgumentParser(**conf)
-        parser.CASE_SENSITIVE = conf_params.get('case_sensitive', getattr(self.entity, 'case_sensitive', True))
+        parser.CASE_SENSITIVE = conf_params.get('case_sensitive', getattr(self.obj, 'case_sensitive', True))
         return parser
 
 
 
 class CallableParserBuilder(BaseParserBuilder):
-    def build_parser(self, **conf_params):
-        parser = super(CallableParserBuilder, self).build_parser(**conf_params)
-        parser.set_defaults(_cmd_func_=self.entity)
-        parser.populate_from(CallableCommandSpec(self.entity))
+    def can_build(self, obj):
+        return inspect.isfunction(obj) or inspect.ismethod(obj)
+
+
+    def build_parser(self, obj, **conf_params):
+        parser = super(CallableParserBuilder, self).build_parser(obj, **conf_params)
+        parser.set_defaults(_cmd_func_=self.obj)
+        parser.populate_from(CallableCommandSpec(self.obj))
+        return parser
+
+
+
+class ObjectParserBuilder(BaseParserBuilder):
+    def can_build(self, obj):
+        return not inspect.isclass(obj) and hasattr(obj, 'commands')
+
+    def build_parser(self, obj,  **conf_params):
+        parser = super(ObjectParserBuilder, self).build_parser(obj, **conf_params)
+        parser.populate_subcommands(obj.commands, ObjectCommandsSpec(obj, obj.commands))
+        parser.set_defaults(_cmd_func_=None)
         return parser
 
 
 
 class ClassParserBuilder(BaseParserBuilder):
-    def build_parser(self, **conf_params):
-        parser = super(ClassParserBuilder, self).build_parser(**conf_params)
-        callable_spec = CallableCommandSpec(self.entity.__init__)
+    def can_build(self, obj):
+        return inspect.isclass(obj) and hasattr(obj, 'commands')
+
+    def build_parser(self, obj, **conf_params):
+        parser = super(ClassParserBuilder, self).build_parser(obj, **conf_params)
+        callable_spec = CallableCommandSpec(obj.__init__)
         if callable_spec.varargs or callable_spec.varkw:
             raise TypeError('*args and **kwargs are not allowed in constructor')
         parser.populate_from(callable_spec)
-        parser.populate_subcommands(self.entity.commands, ClassCommandsSpec(self.entity, self.entity.commands))
-        parser.set_defaults(_cmd_func_= None)
+        parser.populate_subcommands(obj.commands, ClassCommandsSpec(obj, obj.commands))
+        parser.set_defaults(_cmd_func_=None)
         return parser
+
 
 
 class ModuleParserBuilder(BaseParserBuilder):
-    def build_parser(self, **conf_params):
-        parser = super(ClassParserBuilder, self).build_parser(**conf_params)
-        callable_spec = CallableCommandSpec(self.entity.__init__)
-        if callable_spec.varargs or callable_spec.varkw:
-            raise TypeError('*args and **kwargs are not allowed in constructor')
-        parser.populate_from(callable_spec)
-        parser.populate_subcommands(self.entity.commands, ClassCommandsSpec(self.entity, self.entity.commands))
+    def can_build(self, obj):
+        return inspect.ismodule(obj) and hasattr(obj, 'commands')
+
+
+    def build_parser(self, obj, **conf_params):
+        parser = super(ModuleParserBuilder, self).build_parser(obj, **conf_params)
+        parser.populate_subcommands(self.obj.commands, ModuleCommandsSpec(self.obj, self.obj.commands))
         parser.set_defaults(_cmd_func_= None)
         return parser
+
+
+
+class ParserFactory(object):
+    def __init__(self):
+        self.builder_list = []
+        klass = BaseParserBuilder
+        bases = klass.__subclasses__()
+        while bases:
+            current = []
+            for base in bases:
+                current.extend(base.__subclasses__())
+                self.builder_list.append(base)
+            bases = current
+        self.builder_list = [k() for k in reversed(self.builder_list)]
+
+
+    def build_parser(self, obj, **conf_params):
+        for builder in self.builder_list:
+            if builder.can_build(obj):
+                return builder.build_parser(obj, **conf_params)
+        raise ValueError("Parser builder for the object not found")
+
+
+
 
 class ArgumentParser(argparse.ArgumentParser):
     """
@@ -414,14 +505,8 @@ class ArgumentParser(argparse.ArgumentParser):
         Returns an ArgumentParser.
         """
 
-        #TODO: make it better :))
-        if inspect.isclass(obj):
-            builder = ClassParserBuilder(obj)
-        else:
-            builder = CallableParserBuilder(obj)
+        return ParserFactory().build_parser(obj, **conf_params)
 
-        parser = builder.build_parser(**conf_params)
-        return parser
 
     def __init__(self, ignore_errors=False, *args, **kwargs):
         self.ignore_errors = ignore_errors
@@ -429,11 +514,10 @@ class ArgumentParser(argparse.ArgumentParser):
         super(ArgumentParser, self).__init__(*args, **kwargs)
 
 
-
-    def populate_subcommands(self, commands, obj, title='subcommands', cmd_prefix=''):
+    def populate_subcommands(self, commands, commands_spec, title='subcommands', cmd_prefix=''):
         """Extract a list of sub-commands from obj and add them to the parser"""
 
-        if hasattr(obj, 'cmd_prefix') and obj.cmd_prefix in self.prefix_chars:
+        if hasattr(commands_spec, 'cmd_prefix') and commands_spec.cmd_prefix in self.prefix_chars:
             raise ValueError('The prefix {0!r} is already taken!'.format(cmd_prefix))
 
         if not hasattr(self, 'subparsers'):
@@ -441,11 +525,11 @@ class ArgumentParser(argparse.ArgumentParser):
         elif title:
             self.add_argument_group(title=title) # populate ._action_groups
 
-        prefix_len = len(getattr(obj, 'cmd_prefix', ''))
-        add_help = getattr(obj, 'add_help', True)
+        prefix_len = len(getattr(commands_spec, 'cmd_prefix', ''))
+        add_help = getattr(commands_spec, 'add_help', True)
 
         for cmd in commands:
-            func = getattr(obj, cmd[prefix_len:]) # strip the prefix
+            func = getattr(commands_spec, cmd[prefix_len:]) # strip the prefix
             sub_parser = self.subparsers.add_parser(
                                 cmd, add_help=add_help, help=func.__doc__, **self.get_conf(func))
             sub_parser.set_defaults(_cmd_name_=cmd[prefix_len:], _cmd_func_=func)
@@ -527,9 +611,15 @@ class ArgumentParser(argparse.ArgumentParser):
             ns = vars(self.parse_args(arg_list))
 
         func = self._defaults['_cmd_func_']
-        args = [ns[a] for a in self.callable_spec.vars]
-        varargs = ns.get(self.callable_spec.varargs or '', [])
-        kwargs = ns.get(self.callable_spec.varkw or '', {})
+
+        if hasattr(self, 'callable_spec'):
+            args = [ns[a] for a in self.callable_spec.vars]
+            varargs = ns.get(self.callable_spec.varargs or '', [])
+            kwargs = ns.get(self.callable_spec.varkw or '', {})
+        else:
+            args = []
+            varargs = []
+            kwargs = {}
 
         #TODO review this code.. should write tests
 		#Should we analize collisions?
@@ -643,15 +733,10 @@ def name_to_python(name):
         return name.replace('-','_')
 
 
-
-def call(obj, arg_list=sys.argv[1:], greedy=False, only_known_args=False, **parser_params):
+def call(obj=None, arg_list=sys.argv[1:], greedy=False, only_known_args=False, **parser_params):
     """
-    If obj is a function or a bound method, parse the given arg_list
-    by using the parser inferred from the annotations of obj
-    and call obj with the parsed arguments.
-    If obj is an object with attribute .commands, dispatch to the
-    associated subparser.
     """
+    obj = obj or inspect.getmodule(inspect.currentframe().f_back)
     ns, result = ArgumentParser.parser_from(obj, **parser_params).consume(arg_list, only_known_args)
 
     if iterable(result) and not greedy:
